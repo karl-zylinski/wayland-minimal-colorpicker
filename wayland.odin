@@ -33,6 +33,7 @@ WL_LAYER_SURFACE_ANCHOR_BOTTOM :: 2
 WL_LAYER_SURFACE_ANCHOR_LEFT :: 4
 WL_LAYER_SURFACE_ANCHOR_RIGHT :: 8
 WL_LAYER_SURFACE_KEYBOARD_INTERACTIVITY_EXCLUSIVE :: 1
+WL_SCREENCOPY_FRAME_FLAGS_Y_INVERT :: 1
 WL_SHM_FORMAT_ARGB8888 :: 0
 WL_SHM_FORMAT_XRGB8888 :: 1
 WL_SHM_FORMAT_ABGR8888 :: 0x34324241
@@ -276,6 +277,17 @@ wl_screencopy_frame_interface := WL_Interface{"zwlr_screencopy_frame_v1", 3, 3, 
 	{"buffer_done", "3", WL_NO_TYPES},
 })}
 
+wl_fractional_scale_manager_interface := WL_Interface{"wp_fractional_scale_manager_v1", 1, 2, raw_data([]WL_Message{
+	{"destroy", "", WL_NO_TYPES},
+	{"get_fractional_scale", "no", raw_data([]^WL_Interface{&wl_fractional_scale_interface, &wl_surface_interface})},
+}), 0, nil}
+
+wl_fractional_scale_interface := WL_Interface{"wp_fractional_scale_v1", 1, 1, raw_data([]WL_Message{
+	{"destroy", "", WL_NO_TYPES},
+}), 1, raw_data([]WL_Message{
+	{"preferred_scale", "u", WL_NO_TYPES},
+})}
+
 wl_bind :: proc(registry: ^WL_Proxy, name: u32, interface: ^WL_Interface, version: u32) -> ^WL_Proxy {
 	v := min(version, u32(interface.version))
 	return wl_proxy_marshal_flags(registry, 0, interface, v, 0, name, interface.name, v, nil)
@@ -283,6 +295,10 @@ wl_bind :: proc(registry: ^WL_Proxy, name: u32, interface: ^WL_Interface, versio
 
 WL_Callback_Listener :: struct {
 	done: proc "c" (data: rawptr, callback: ^WL_Proxy, callback_data: u32),
+}
+
+WL_Fractional_Scale_Listener :: struct {
+	preferred_scale: proc "c" (data: rawptr, fractional_scale: ^WL_Proxy, scale: u32),
 }
 
 WL_Registry_Listener :: struct {

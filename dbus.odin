@@ -244,15 +244,19 @@ dbus_skip_value :: proc(p: int, sig: u8) -> (next: int, value: u32, ok: bool) {
 	return p, 0, false
 }
 
-dbus_wait_reply :: proc(serial: u32) -> (format: u32, ok: bool) {
+Dbus_Image_Info :: struct {
+	format, width, height, stride: u32,
+}
+
+dbus_wait_reply :: proc(serial: u32) -> (info: Dbus_Image_Info, ok: bool) {
 	for {
 		for dbus_in_len < 16 || dbus_in_len < dbus_align(16 + int(dbus_get_u32(12)), 8) + int(dbus_get_u32(4)) {
 			if dbus_in_len >= 16 && dbus_align(16 + int(dbus_get_u32(12)), 8) + int(dbus_get_u32(4)) > len(dbus_in) {
-				return 0, false
+				return {}, false
 			}
 			n := dbus_read(dbus_socket, dbus_in[dbus_in_len:])
 			if n <= 0 {
-				return 0, false
+				return {}, false
 			}
 			dbus_in_len += n
 		}
@@ -297,8 +301,15 @@ dbus_wait_reply :: proc(serial: u32) -> (format: u32, ok: bool) {
 				if !value_ok {
 					break
 				}
-				if key == "format" {
-					format = v
+				switch key {
+				case "format":
+					info.format = v
+				case "width":
+					info.width = v
+				case "height":
+					info.height = v
+				case "stride":
+					info.stride = v
 				}
 			}
 		}
@@ -306,12 +317,12 @@ dbus_wait_reply :: proc(serial: u32) -> (format: u32, ok: bool) {
 		copy(dbus_in[:], dbus_in[total:dbus_in_len])
 		dbus_in_len -= total
 		if found {
-			return format, msg_type == DBUS_MESSAGE_TYPE_METHOD_RETURN
+			return info, msg_type == DBUS_MESSAGE_TYPE_METHOD_RETURN
 		}
 	}
 }
 
-dbus_kde_capture_pixel :: proc(x, y: i32) -> (rgb: u32, ok: bool) {
+dbus_kde_capture_pixel :: proc(x, y: i32, fx, fy: f32) -> (rgb: u32, ok: bool) {
 	if dbus_socket < 0 && !dbus_connect() {
 		return 0, false
 	}
@@ -328,7 +339,13 @@ dbus_kde_capture_pixel :: proc(x, y: i32) -> (rgb: u32, ok: bool) {
 	dbus_put_u32(1)
 	dbus_put_u32(1)
 	dbus_put_u32(0)
+	array_length_at := dbus_out_len - 4
 	dbus_put_pad(8)
+	array_start := dbus_out_len
+	dbus_put_str("native-resolution")
+	dbus_put_sig("b")
+	dbus_put_u32(1)
+	(^u32)(&dbus_out[array_length_at])^ = u32(dbus_out_len - array_start)
 	dbus_put_u32(0)
 	dbus_end_call(body)
 	sent := dbus_send(fds[1])
@@ -338,13 +355,13 @@ dbus_kde_capture_pixel :: proc(x, y: i32) -> (rgb: u32, ok: bool) {
 		return 0, false
 	}
 
-	format, reply_ok := dbus_wait_reply(dbus_serial)
+	info, reply_ok := dbus_wait_reply(dbus_serial)
 	if !reply_ok {
 		dbus_disconnect()
 		return 0, false
 	}
 
-	buf: [64]u8
+	buf: [256]u8
 	n := 0
 	for n < len(buf) {
 		r := dbus_read(fds[0], buf[n:])
@@ -353,15 +370,20 @@ dbus_kde_capture_pixel :: proc(x, y: i32) -> (rgb: u32, ok: bool) {
 		}
 		n += r
 	}
-	if n < 4 {
+	w := max(int(info.width), 1)
+	h := max(int(info.height), 1)
+	ix := min(int(fx * f32(w)), w - 1)
+	iy := min(int(fy * f32(h)), h - 1)
+	at := iy * int(info.stride) + ix * 4
+	if at + 4 > n {
 		return 0, false
 	}
 
-	switch format {
+	switch info.format {
 	case QIMAGE_FORMAT_RGB32, QIMAGE_FORMAT_ARGB32, QIMAGE_FORMAT_ARGB32_PREMULTIPLIED:
-		rgb = (u32(buf[2]) << 16) | (u32(buf[1]) << 8) | u32(buf[0])
+		rgb = (u32(buf[at + 2]) << 16) | (u32(buf[at + 1]) << 8) | u32(buf[at])
 	case:
-		rgb = (u32(buf[0]) << 16) | (u32(buf[1]) << 8) | u32(buf[2])
+		rgb = (u32(buf[at]) << 16) | (u32(buf[at + 1]) << 8) | u32(buf[at + 2])
 	}
 	return rgb, true
 }

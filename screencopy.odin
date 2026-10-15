@@ -12,6 +12,7 @@ screencopy_manager: ^WL_Proxy
 screencopy_frame_state: Screencopy_Frame_State
 screencopy_format, screencopy_width, screencopy_height, screencopy_stride: u32
 screencopy_has_shm: bool
+screencopy_flags: u32
 screencopy_buffer: ^WL_Proxy
 
 screencopy_request_copy :: proc "c" (frame: ^WL_Proxy) {
@@ -34,6 +35,10 @@ screencopy_on_buffer :: proc "c" (data: rawptr, frame: ^WL_Proxy, format, width,
 	}
 }
 
+screencopy_on_flags :: proc "c" (data: rawptr, frame: ^WL_Proxy, flags: u32) {
+	screencopy_flags = flags
+}
+
 screencopy_on_buffer_done :: proc "c" (data: rawptr, frame: ^WL_Proxy) {
 	screencopy_request_copy(frame)
 }
@@ -48,14 +53,16 @@ screencopy_on_failed :: proc "c" (data: rawptr, frame: ^WL_Proxy) {
 
 screencopy_frame_listener := WL_Screencopy_Frame_Listener {
 	buffer      = screencopy_on_buffer,
+	flags       = screencopy_on_flags,
 	ready       = screencopy_on_ready,
 	failed      = screencopy_on_failed,
 	buffer_done = screencopy_on_buffer_done,
 }
 
-screencopy_pixel :: proc(output: ^WL_Proxy, x, y: i32) -> (rgb: u32, ok: bool) {
+screencopy_pixel :: proc(output: ^WL_Proxy, x, y: i32, fx, fy: f32) -> (rgb: u32, ok: bool) {
 	screencopy_frame_state = .Waiting
 	screencopy_has_shm = false
+	screencopy_flags = 0
 	screencopy_buffer = nil
 
 	frame := wl_proxy_marshal_flags(screencopy_manager, 1, &wl_screencopy_frame_interface, wl_proxy_get_version(screencopy_manager), 0, nil, i32(0), output, x, y, i32(1), i32(1))
@@ -75,7 +82,12 @@ screencopy_pixel :: proc(output: ^WL_Proxy, x, y: i32) -> (rgb: u32, ok: bool) {
 		return 0, false
 	}
 
-	px := pool_memory[SCREENCOPY_OFFSET / 4]
+	ix := min(int(fx * f32(screencopy_width)), int(screencopy_width) - 1)
+	iy := min(int(fy * f32(screencopy_height)), int(screencopy_height) - 1)
+	if screencopy_flags & WL_SCREENCOPY_FRAME_FLAGS_Y_INVERT != 0 {
+		iy = int(screencopy_height) - 1 - iy
+	}
+	px := pool_memory[(SCREENCOPY_OFFSET + iy * int(screencopy_stride) + ix * 4) / 4]
 	switch screencopy_format {
 	case WL_SHM_FORMAT_ARGB8888, WL_SHM_FORMAT_XRGB8888:
 		rgb = px & 0xFFFFFF
