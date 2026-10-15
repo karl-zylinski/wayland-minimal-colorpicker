@@ -53,13 +53,16 @@ layer_shell: ^WL_Proxy
 fractional_scale_manager: ^WL_Proxy
 
 Output :: struct {
-	proxy: ^WL_Proxy,
-	x, y:  i32,
+	proxy:   ^WL_Proxy,
+	x, y:    i32,
+	refresh: i32,
 }
 outputs: [16]Output
 output_count: int
 output_x, output_y: i32
 current_output: ^WL_Proxy
+capture_interval_ns: i64 = 16_666_666
+next_capture_ns: i64
 shm_pool: ^WL_Proxy
 
 surface: ^WL_Proxy
@@ -74,6 +77,8 @@ pool_memory: [^]u32
 pointer: ^WL_Proxy
 enter_serial: u32
 hot_x, hot_y: i32 = CROSS_HALF, CROSS_HALF
+drawn_color: u32 = 0xFFFFFFFF
+drawn_rgb_mode: bool
 
 scale120: u32 = 120
 scale_changed: bool
@@ -151,8 +156,19 @@ output_geometry :: proc "c" (data: rawptr, o: ^WL_Proxy, x, y, physical_width, p
 		}
 	}
 }
+output_mode :: proc "c" (data: rawptr, o: ^WL_Proxy, flags: u32, w, h, refresh: i32) {
+	if flags & WL_OUTPUT_MODE_CURRENT == 0 || refresh <= 0 {
+		return
+	}
+	for &out in outputs[:output_count] {
+		if out.proxy == o {
+			out.refresh = refresh
+		}
+	}
+}
 output_listener := WL_Output_Listener{
 	geometry = output_geometry,
+	mode     = output_mode,
 }
 
 surface_enter :: proc "c" (data: rawptr, s: ^WL_Proxy, o: ^WL_Proxy) {
@@ -161,6 +177,9 @@ surface_enter :: proc "c" (data: rawptr, s: ^WL_Proxy, o: ^WL_Proxy) {
 			output_x = out.x
 			current_output = o
 			output_y = out.y
+			if out.refresh > 0 {
+				capture_interval_ns = 1_000_000_000_000 / i64(out.refresh)
+			}
 			moved = true
 		}
 	}
@@ -445,6 +464,17 @@ draw_cursor :: proc(px: [^]u32, rgb: u32, used: int, left, above: bool) {
 }
 
 redraw :: proc() {
+	write_text(color)
+	used := min(text_x + text_len * advance - char_gap + pad_x, label_bw)
+	left := cursor_x + LABEL_OFFSET + i32(logical(used)) > width
+	above := cursor_y + LABEL_OFFSET + i32(label_lh) > height
+	hx := left ? i32(LABEL_OFFSET + label_lw) : i32(CROSS_HALF)
+	hy := above ? i32(LABEL_OFFSET + label_lh) : i32(CROSS_HALF)
+	hot_changed := hx != hot_x || hy != hot_y
+	if !hot_changed && color == drawn_color && rgb_mode == drawn_rgb_mode {
+		return
+	}
+
 	b := -1
 	for i in 0 ..< 2 {
 		if !cursor_busy[i] {
@@ -457,15 +487,10 @@ redraw :: proc() {
 		return
 	}
 
-	write_text(color)
-	used := min(text_x + text_len * advance - char_gap + pad_x, label_bw)
-	left := cursor_x + LABEL_OFFSET + i32(logical(used)) > width
-	above := cursor_y + LABEL_OFFSET + i32(label_lh) > height
-	hx := left ? i32(LABEL_OFFSET + label_lw) : i32(CROSS_HALF)
-	hy := above ? i32(LABEL_OFFSET + label_lh) : i32(CROSS_HALF)
-	hot_changed := hx != hot_x || hy != hot_y
 	hot_x = hx
 	hot_y = hy
+	drawn_color = color
+	drawn_rgb_mode = rgb_mode
 
 	draw_cursor(pool_memory[b * CURSOR_MAX_SIZE / 4:], color, used, left, above)
 	cursor_busy[b] = true
@@ -486,6 +511,11 @@ capture :: proc() -> (rgb: u32, ok: bool) {
 		return screencopy_pixel(current_output, cursor_x, cursor_y, cursor_fx, cursor_fy)
 	}
 	return dbus_kde_capture_pixel(output_x + cursor_x, output_y + cursor_y, cursor_fx, cursor_fy)
+}
+
+now_ns :: proc() -> i64 {
+	ts, _ := linux.clock_gettime(.MONOTONIC)
+	return i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec)
 }
 
 fail :: proc(msg: string) -> ! {
@@ -594,7 +624,11 @@ main :: proc() {
 		}
 		wl_display_flush(display)
 		fds[1].fd = picked ? -1 : toggle_socket
-		linux.poll(fds[:], -1)
+		timeout := i32(-1)
+		if moved && !picked && width > 0 {
+			timeout = i32(max(0, (next_capture_ns - now_ns() + 999_999) / 1_000_000))
+		}
+		linux.poll(fds[:], timeout)
 		if fds[0].revents & {.ERR, .HUP, .NVAL} != {} && .IN not_in fds[0].revents {
 			wl_display_cancel_read(display)
 			break
@@ -633,16 +667,6 @@ main :: proc() {
 			setup_scale()
 			dirty = true
 		}
-		if moved && !pick_pending && frame_pending {
-			continue
-		}
-		if moved {
-			moved = false
-			if rgb, ok := capture(); ok {
-				color = rgb
-			}
-			dirty = true
-		}
 		if pick_pending {
 			pick_pending = false
 			if moved {
@@ -653,6 +677,14 @@ main :: proc() {
 			}
 			pick(pick_serial)
 			continue
+		}
+		if moved && now_ns() >= next_capture_ns {
+			moved = false
+			next_capture_ns = now_ns() + capture_interval_ns
+			if rgb, ok := capture(); ok {
+				color = rgb
+			}
+			dirty = true
 		}
 		if dirty && !frame_pending {
 			dirty = false
