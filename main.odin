@@ -172,11 +172,11 @@ surface_listener := WL_Surface_Listener{
 layer_configure :: proc "c" (data: rawptr, ls: ^WL_Proxy, serial: u32, w: u32, h: u32) {
 	width = i32(w)
 	height = i32(h)
-	wl_proxy_marshal_flags(ls, 6, nil, wl_proxy_get_version(ls), 0, serial)
-	wl_proxy_marshal_flags(viewport, 2, nil, wl_proxy_get_version(viewport), 0, width, height)
-	wl_proxy_marshal_flags(surface, 1, nil, wl_proxy_get_version(surface), 0, pixel_buffer, i32(0), i32(0))
-	wl_proxy_marshal_flags(surface, 9, nil, wl_proxy_get_version(surface), 0, i32(0), i32(0), i32(1), i32(1))
-	wl_proxy_marshal_flags(surface, 6, nil, wl_proxy_get_version(surface), 0)
+	wl_proxy_marshal_flags(ls, WL_LAYER_SURFACE_ACK_CONFIGURE, nil, wl_proxy_get_version(ls), 0, serial)
+	wl_proxy_marshal_flags(viewport, WL_VIEWPORT_SET_DESTINATION, nil, wl_proxy_get_version(viewport), 0, width, height)
+	wl_proxy_marshal_flags(surface, WL_SURFACE_ATTACH, nil, wl_proxy_get_version(surface), 0, pixel_buffer, i32(0), i32(0))
+	wl_proxy_marshal_flags(surface, WL_SURFACE_DAMAGE_BUFFER, nil, wl_proxy_get_version(surface), 0, i32(0), i32(0), i32(1), i32(1))
+	wl_proxy_marshal_flags(surface, WL_SURFACE_COMMIT, nil, wl_proxy_get_version(surface), 0)
 }
 
 layer_closed :: proc "c" (data: rawptr, ls: ^WL_Proxy) {
@@ -221,7 +221,7 @@ pointer_enter :: proc "c" (data: rawptr, p: ^WL_Proxy, serial: u32, s: ^WL_Proxy
 	pointer = p
 	enter_serial = serial
 	frame_pending = false
-	wl_proxy_marshal_flags(p, 0, nil, wl_proxy_get_version(p), 0, serial, cursor_surface, hot_x, hot_y)
+	wl_proxy_marshal_flags(p, WL_POINTER_SET_CURSOR, nil, wl_proxy_get_version(p), 0, serial, cursor_surface, hot_x, hot_y)
 	set_cursor_position(x, y)
 }
 
@@ -286,7 +286,7 @@ data_device: ^WL_Proxy
 data_device_selection :: proc "c" (data: rawptr, dd: ^WL_Proxy, offer: ^WL_Proxy) {
 	if offer != nil {
 		selection_seen = true
-		wl_proxy_marshal_flags(offer, 2, nil, wl_proxy_get_version(offer), WL_MARSHAL_FLAG_DESTROY)
+		wl_proxy_marshal_flags(offer, WL_DATA_OFFER_DESTROY, nil, wl_proxy_get_version(offer), WL_MARSHAL_FLAG_DESTROY)
 	}
 }
 data_device_listener := WL_Data_Device_Listener {
@@ -297,19 +297,19 @@ pick :: proc(serial: u32) {
 	picked = true
 	linux.close(toggle_socket)
 	write_text(color)
-	source := wl_proxy_marshal_flags(data_device_manager, 0, &wl_data_source_interface, wl_proxy_get_version(data_device_manager), 0, nil)
+	source := wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE, &wl_data_source_interface, wl_proxy_get_version(data_device_manager), 0, nil)
 	wl_listen(source, &source_listener)
-	wl_proxy_marshal_flags(source, 0, nil, wl_proxy_get_version(source), 0, cstring("text/plain;charset=utf-8"))
-	wl_proxy_marshal_flags(source, 0, nil, wl_proxy_get_version(source), 0, cstring("text/plain"))
-	wl_proxy_marshal_flags(source, 0, nil, wl_proxy_get_version(source), 0, cstring("UTF8_STRING"))
+	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain;charset=utf-8"))
+	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain"))
+	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("UTF8_STRING"))
 	selection_seen = false
-	wl_proxy_marshal_flags(data_device, 1, nil, wl_proxy_get_version(data_device), 0, source, serial)
+	wl_proxy_marshal_flags(data_device, WL_DATA_DEVICE_SET_SELECTION, nil, wl_proxy_get_version(data_device), 0, source, serial)
 	wl_display_roundtrip(display)
 	if !selection_seen {
 		running = false
 	}
-	wl_proxy_marshal_flags(layer_surface, 7, nil, wl_proxy_get_version(layer_surface), WL_MARSHAL_FLAG_DESTROY)
-	wl_proxy_marshal_flags(surface, 0, nil, wl_proxy_get_version(surface), WL_MARSHAL_FLAG_DESTROY)
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_DESTROY, nil, wl_proxy_get_version(layer_surface), WL_MARSHAL_FLAG_DESTROY)
+	wl_proxy_marshal_flags(surface, WL_SURFACE_DESTROY, nil, wl_proxy_get_version(surface), WL_MARSHAL_FLAG_DESTROY)
 }
 
 write_text :: proc "contextless" (rgb: u32) {
@@ -373,13 +373,13 @@ setup_scale :: proc() {
 
 	for i in 0 ..< 2 {
 		if cursor_buffers[i] != nil {
-			wl_proxy_marshal_flags(cursor_buffers[i], 0, nil, wl_proxy_get_version(cursor_buffers[i]), WL_MARSHAL_FLAG_DESTROY)
+			wl_proxy_marshal_flags(cursor_buffers[i], WL_BUFFER_DESTROY, nil, wl_proxy_get_version(cursor_buffers[i]), WL_MARSHAL_FLAG_DESTROY)
 		}
-		cursor_buffers[i] = wl_proxy_marshal_flags(shm_pool, 0, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(i * CURSOR_MAX_SIZE), i32(box_bw), i32(box_bh), i32(box_bw * 4), u32(WL_SHM_FORMAT_ARGB8888))
+		cursor_buffers[i] = wl_proxy_marshal_flags(shm_pool, WL_SHM_POOL_CREATE_BUFFER, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(i * CURSOR_MAX_SIZE), i32(box_bw), i32(box_bh), i32(box_bw * 4), u32(WL_SHM_FORMAT_ARGB8888))
 		wl_listen(cursor_buffers[i], &buffer_listener)
 		cursor_busy[i] = false
 	}
-	wl_proxy_marshal_flags(cursor_viewport, 2, nil, wl_proxy_get_version(cursor_viewport), 0, i32(box_lw), i32(box_lh))
+	wl_proxy_marshal_flags(cursor_viewport, WL_VIEWPORT_SET_DESTINATION, nil, wl_proxy_get_version(cursor_viewport), 0, i32(box_lw), i32(box_lh))
 	hot_x = -1
 }
 
@@ -470,15 +470,15 @@ redraw :: proc() {
 	draw_cursor(pool_memory[b * CURSOR_MAX_SIZE / 4:], color, used, left, above)
 	cursor_busy[b] = true
 
-	wl_proxy_marshal_flags(cursor_surface, 1, nil, wl_proxy_get_version(cursor_surface), 0, cursor_buffers[b], i32(0), i32(0))
-	wl_proxy_marshal_flags(cursor_surface, 9, nil, wl_proxy_get_version(cursor_surface), 0, i32(0), i32(0), i32(box_bw), i32(box_bh))
+	wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_ATTACH, nil, wl_proxy_get_version(cursor_surface), 0, cursor_buffers[b], i32(0), i32(0))
+	wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_DAMAGE_BUFFER, nil, wl_proxy_get_version(cursor_surface), 0, i32(0), i32(0), i32(box_bw), i32(box_bh))
 	if hot_changed && pointer != nil {
-		wl_proxy_marshal_flags(pointer, 0, nil, wl_proxy_get_version(pointer), 0, enter_serial, cursor_surface, hot_x, hot_y)
+		wl_proxy_marshal_flags(pointer, WL_POINTER_SET_CURSOR, nil, wl_proxy_get_version(pointer), 0, enter_serial, cursor_surface, hot_x, hot_y)
 	}
-	frame := wl_proxy_marshal_flags(cursor_surface, 3, &wl_callback_interface, wl_proxy_get_version(cursor_surface), 0, nil)
+	frame := wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_FRAME, &wl_callback_interface, wl_proxy_get_version(cursor_surface), 0, nil)
 	wl_listen(frame, &frame_listener)
 	frame_pending = true
-	wl_proxy_marshal_flags(cursor_surface, 6, nil, wl_proxy_get_version(cursor_surface), 0)
+	wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_COMMIT, nil, wl_proxy_get_version(cursor_surface), 0)
 }
 
 capture :: proc() -> (rgb: u32, ok: bool) {
@@ -524,7 +524,7 @@ main :: proc() {
 		fail("no wayland display\n")
 	}
 
-	registry := wl_proxy_marshal_flags((^WL_Proxy)(display), 1, &wl_registry_interface, wl_proxy_get_version((^WL_Proxy)(display)), 0, nil)
+	registry := wl_proxy_marshal_flags((^WL_Proxy)(display), WL_DISPLAY_GET_REGISTRY, &wl_registry_interface, wl_proxy_get_version((^WL_Proxy)(display)), 0, nil)
 	wl_listen(registry, &registry_listener)
 	wl_display_roundtrip(display)
 	wl_display_roundtrip(display)
@@ -548,8 +548,8 @@ main :: proc() {
 	pool_memory = ([^]u32)(mem)
 	pool_memory[PIXEL_OFFSET / 4] = 0
 
-	shm_pool = wl_proxy_marshal_flags(shm, 0, &wl_shm_pool_interface, wl_proxy_get_version(shm), 0, nil, i32(fd), i32(POOL_SIZE))
-	pixel_buffer = wl_proxy_marshal_flags(shm_pool, 0, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(PIXEL_OFFSET), i32(1), i32(1), i32(4), u32(WL_SHM_FORMAT_ARGB8888))
+	shm_pool = wl_proxy_marshal_flags(shm, WL_SHM_CREATE_POOL, &wl_shm_pool_interface, wl_proxy_get_version(shm), 0, nil, i32(fd), i32(POOL_SIZE))
+	pixel_buffer = wl_proxy_marshal_flags(shm_pool, WL_SHM_POOL_CREATE_BUFFER, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(PIXEL_OFFSET), i32(1), i32(1), i32(4), u32(WL_SHM_FORMAT_ARGB8888))
 	linux.close(fd)
 
 	current_output = outputs[0].proxy
@@ -558,34 +558,34 @@ main :: proc() {
 	}
 
 	if seat_capabilities & WL_SEAT_CAPABILITY_POINTER != 0 {
-		seat_pointer := wl_proxy_marshal_flags(seat, 0, &wl_pointer_interface, wl_proxy_get_version(seat), 0, nil)
+		seat_pointer := wl_proxy_marshal_flags(seat, WL_SEAT_GET_POINTER, &wl_pointer_interface, wl_proxy_get_version(seat), 0, nil)
 		wl_listen(seat_pointer, &pointer_listener)
 	}
 	if seat_capabilities & WL_SEAT_CAPABILITY_KEYBOARD != 0 {
-		keyboard := wl_proxy_marshal_flags(seat, 1, &wl_keyboard_interface, wl_proxy_get_version(seat), 0, nil)
+		keyboard := wl_proxy_marshal_flags(seat, WL_SEAT_GET_KEYBOARD, &wl_keyboard_interface, wl_proxy_get_version(seat), 0, nil)
 		wl_listen(keyboard, &keyboard_listener)
 	}
-	data_device = wl_proxy_marshal_flags(data_device_manager, 1, &wl_data_device_interface, wl_proxy_get_version(data_device_manager), 0, nil, seat)
+	data_device = wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE, &wl_data_device_interface, wl_proxy_get_version(data_device_manager), 0, nil, seat)
 	wl_listen(data_device, &data_device_listener)
 
-	surface = wl_proxy_marshal_flags(compositor, 0, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
+	surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
 	wl_listen(surface, &surface_listener)
-	viewport = wl_proxy_marshal_flags(viewporter, 1, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, surface)
+	viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, surface)
 	if fractional_scale_manager != nil {
-		fractional_scale := wl_proxy_marshal_flags(fractional_scale_manager, 1, &wl_fractional_scale_interface, wl_proxy_get_version(fractional_scale_manager), 0, nil, surface)
+		fractional_scale := wl_proxy_marshal_flags(fractional_scale_manager, WL_FRACTIONAL_SCALE_MANAGER_GET_FRACTIONAL_SCALE, &wl_fractional_scale_interface, wl_proxy_get_version(fractional_scale_manager), 0, nil, surface)
 		wl_listen(fractional_scale, &fractional_scale_listener)
 	}
 
-	cursor_surface = wl_proxy_marshal_flags(compositor, 0, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
-	cursor_viewport = wl_proxy_marshal_flags(viewporter, 1, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, cursor_surface)
+	cursor_surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
+	cursor_viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, cursor_surface)
 	setup_scale()
 
-	layer_surface = wl_proxy_marshal_flags(layer_shell, 0, &wl_layer_surface_interface, wl_proxy_get_version(layer_shell), 0, nil, surface, nil, u32(WL_LAYER_SHELL_LAYER_OVERLAY), cstring("dock"))
+	layer_surface = wl_proxy_marshal_flags(layer_shell, WL_LAYER_SHELL_GET_LAYER_SURFACE, &wl_layer_surface_interface, wl_proxy_get_version(layer_shell), 0, nil, surface, nil, u32(WL_LAYER_SHELL_LAYER_OVERLAY), cstring("dock"))
 	wl_listen(layer_surface, &layer_surface_listener)
-	wl_proxy_marshal_flags(layer_surface, 1, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_ANCHOR_TOP | WL_LAYER_SURFACE_ANCHOR_BOTTOM | WL_LAYER_SURFACE_ANCHOR_LEFT | WL_LAYER_SURFACE_ANCHOR_RIGHT))
-	wl_proxy_marshal_flags(layer_surface, 2, nil, wl_proxy_get_version(layer_surface), 0, i32(-1))
-	wl_proxy_marshal_flags(layer_surface, 4, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_KEYBOARD_INTERACTIVITY_EXCLUSIVE))
-	wl_proxy_marshal_flags(surface, 6, nil, wl_proxy_get_version(surface), 0)
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_ANCHOR, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_ANCHOR_TOP | WL_LAYER_SURFACE_ANCHOR_BOTTOM | WL_LAYER_SURFACE_ANCHOR_LEFT | WL_LAYER_SURFACE_ANCHOR_RIGHT))
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_EXCLUSIVE_ZONE, nil, wl_proxy_get_version(layer_surface), 0, i32(-1))
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_KEYBOARD_INTERACTIVITY, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_KEYBOARD_INTERACTIVITY_EXCLUSIVE))
+	wl_proxy_marshal_flags(surface, WL_SURFACE_COMMIT, nil, wl_proxy_get_version(surface), 0)
 
 	fds := [2]linux.Poll_Fd{{fd = linux.Fd(wl_display_get_fd(display)), events = {.IN}}, {fd = toggle_socket, events = {.IN}}}
 	for running {

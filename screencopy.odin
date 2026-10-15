@@ -20,8 +20,8 @@ screencopy_request_copy :: proc "c" (frame: ^WL_Proxy) {
 		screencopy_frame_state = .Failed
 		return
 	}
-	screencopy_buffer = wl_proxy_marshal_flags(shm_pool, 0, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(SCREENCOPY_OFFSET), i32(screencopy_width), i32(screencopy_height), i32(screencopy_stride), screencopy_format)
-	wl_proxy_marshal_flags(frame, 0, nil, wl_proxy_get_version(frame), 0, screencopy_buffer)
+	screencopy_buffer = wl_proxy_marshal_flags(shm_pool, WL_SHM_POOL_CREATE_BUFFER, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(SCREENCOPY_OFFSET), i32(screencopy_width), i32(screencopy_height), i32(screencopy_stride), screencopy_format)
+	wl_proxy_marshal_flags(frame, WL_SCREENCOPY_FRAME_COPY, nil, wl_proxy_get_version(frame), 0, screencopy_buffer)
 }
 
 screencopy_on_buffer :: proc "c" (data: rawptr, frame: ^WL_Proxy, format, width, height, stride: u32) {
@@ -65,7 +65,7 @@ screencopy_pixel :: proc(output: ^WL_Proxy, x, y: i32, fx, fy: f32) -> (rgb: u32
 	screencopy_flags = 0
 	screencopy_buffer = nil
 
-	frame := wl_proxy_marshal_flags(screencopy_manager, 1, &wl_screencopy_frame_interface, wl_proxy_get_version(screencopy_manager), 0, nil, i32(0), output, x, y, i32(1), i32(1))
+	frame := wl_proxy_marshal_flags(screencopy_manager, WL_SCREENCOPY_MANAGER_CAPTURE_OUTPUT_REGION, &wl_screencopy_frame_interface, wl_proxy_get_version(screencopy_manager), 0, nil, i32(0), output, x, y, i32(1), i32(1))
 	wl_listen(frame, &screencopy_frame_listener)
 
 	for screencopy_frame_state == .Waiting {
@@ -74,9 +74,9 @@ screencopy_pixel :: proc(output: ^WL_Proxy, x, y: i32, fx, fy: f32) -> (rgb: u32
 		}
 	}
 
-	wl_proxy_marshal_flags(frame, 1, nil, wl_proxy_get_version(frame), WL_MARSHAL_FLAG_DESTROY)
+	wl_proxy_marshal_flags(frame, WL_SCREENCOPY_FRAME_DESTROY, nil, wl_proxy_get_version(frame), WL_MARSHAL_FLAG_DESTROY)
 	if screencopy_buffer != nil {
-		wl_proxy_marshal_flags(screencopy_buffer, 0, nil, wl_proxy_get_version(screencopy_buffer), WL_MARSHAL_FLAG_DESTROY)
+		wl_proxy_marshal_flags(screencopy_buffer, WL_BUFFER_DESTROY, nil, wl_proxy_get_version(screencopy_buffer), WL_MARSHAL_FLAG_DESTROY)
 	}
 	if screencopy_frame_state != .Ready {
 		return 0, false
