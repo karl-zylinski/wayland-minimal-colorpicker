@@ -23,7 +23,6 @@ WL_Interface :: struct {
 	events:       [^]WL_Message,
 }
 
-WL_OUTPUT_MODE_CURRENT :: 1
 WL_SEAT_CAPABILITY_POINTER :: 1
 WL_SEAT_CAPABILITY_KEYBOARD :: 2
 WL_POINTER_BUTTON_STATE_PRESSED :: 1
@@ -325,7 +324,7 @@ wl_fractional_scale_interface := WL_Interface{"wp_fractional_scale_v1", 1, 1, ra
 	{"preferred_scale", "u", WL_NO_TYPES},
 })}
 
-wl_bind :: proc(registry: ^WL_Proxy, name: u32, interface: ^WL_Interface, version: u32) -> ^WL_Proxy {
+wl_bind :: proc "contextless" (registry: ^WL_Proxy, name: u32, interface: ^WL_Interface, version: u32) -> ^WL_Proxy {
 	v := min(version, u32(interface.version))
 	return wl_proxy_marshal_flags(registry, WL_REGISTRY_BIND, interface, v, 0, name, interface.name, v, nil)
 }

@@ -1,7 +1,7 @@
 package minimal_colorpicker
 
-import "base:runtime"
 import "core:c/libc"
+import "core:slice"
 import "core:sys/linux"
 
 BTN_LEFT :: 0x110
@@ -19,6 +19,298 @@ CURSOR_MAX_SIZE :: CURSOR_MAX_W * CURSOR_MAX_H * 4
 PIXEL_OFFSET :: CURSOR_MAX_SIZE * 2
 SCREENCOPY_OFFSET :: PIXEL_OFFSET + 4
 POOL_SIZE :: SCREENCOPY_OFFSET + SCREENCOPY_SIZE
+
+Mode :: enum {
+	Hex,
+	RGB,
+}
+
+Poll_Index :: enum {
+	Wayland,
+	Toggle,
+}
+
+display: ^WL_Display
+compositor: ^WL_Proxy
+shm: ^WL_Proxy
+seat: ^WL_Proxy
+data_device_manager: ^WL_Proxy
+viewporter: ^WL_Proxy
+layer_shell: ^WL_Proxy
+fractional_scale_manager: ^WL_Proxy
+
+Output :: struct {
+	proxy:   ^WL_Proxy,
+	x, y:    i32,
+}
+outputs: [16]Output
+output_count: int
+current_output: ^WL_Proxy
+shm_pool: ^WL_Proxy
+
+surface: ^WL_Proxy
+layer_surface: ^WL_Proxy
+viewport: ^WL_Proxy
+cursor_surface: ^WL_Proxy
+cursor_viewport: ^WL_Proxy
+pixel_buffer: ^WL_Proxy
+pool_memory: [^]u32
+
+configured: bool
+moved: bool
+dirty: bool
+frame_pending: bool
+color: u32
+mode: Mode
+toggle_socket: linux.Fd
+state_path: [256]u8
+state_dir_len: int
+running := true
+mouse_went_down: bool
+pick_serial: u32
+clipboard_accepted: bool
+
+main :: proc() {
+	libc.signal(SIGPIPE, transmute(proc "c" (i32))libc.SIG_IGN)
+
+	//
+	// Bind to named UNIX socket. First instance of program listens on it. Second one connects. This
+	// is used to toggle the first instance to switch between Hex and RGB mode. 
+	//
+
+	addr := linux.Sock_Addr_Un{sun_family = .UNIX}
+	copy(addr.sun_path[1:], "karl_zylinski_minimal_colorpicker")
+	toggle_socket, _ = linux.socket(.UNIX, .STREAM, {.CLOEXEC, .NONBLOCK}, .HOPOPT)
+	if linux.bind(toggle_socket, &addr) != .NONE {
+		linux.connect(toggle_socket, &addr)
+		return
+	}
+	linux.listen(toggle_socket, 4)
+
+	//
+	// Find stored state. The most recent Hex / RGB mode is stored there.
+	//
+
+	if xdg := string(libc.getenv("XDG_STATE_HOME")); len(xdg) > 0 && xdg[0] == '/' {
+		state_dir_len = copy(state_path[:200], xdg)
+	} else {
+		state_dir_len = copy(state_path[:200], string(libc.getenv("HOME")))
+		state_dir_len += copy(state_path[state_dir_len:200], "/.local/state")
+	}
+	copy(state_path[state_dir_len:255], "/minimal_colorpicker")
+	if fd, err := linux.open(cstring(&state_path[0]), {}); err == .NONE {
+		b: [1]u8
+		linux.read(fd, b[:])
+		linux.close(fd)
+		mode = b[0] == '1' ? .RGB : .Hex
+	}
+
+	//
+	// Connect to Wayland.
+	//
+
+	display = wl_display_connect(nil)
+	if display == nil {
+		fail("no wayland display\n")
+	}
+
+	registry := wl_proxy_marshal_flags((^WL_Proxy)(display), WL_DISPLAY_GET_REGISTRY, &wl_registry_interface, wl_proxy_get_version((^WL_Proxy)(display)), 0, nil)
+	wl_listen(registry, &registry_listener)
+	wl_display_roundtrip(display)
+	wl_display_roundtrip(display)
+
+	if compositor == nil || shm == nil || seat == nil || data_device_manager == nil || viewporter == nil || layer_shell == nil {
+		fail("missing wayland globals\n")
+	}
+	if output_count == 0 {
+		fail("no outputs\n")
+	}
+
+	//
+	// Create memory pool shared with compositor so we can write straight into it... It holds a 1x1
+	// transparent pixel that is stretched across screen as well as the graphics we show under the
+	// mouse.
+	//
+
+	fd, err := linux.memfd_create("karl_zylinski_minimal_colorpicker", {.CLOEXEC})
+	if err != .NONE {
+		fail("memfd_create failed\n")
+	}
+	linux.ftruncate(fd, POOL_SIZE)
+	mem, merr := linux.mmap(0, POOL_SIZE, {.READ, .WRITE}, {.SHARED}, fd)
+	if merr != .NONE {
+		fail("mmap failed\n")
+	}
+	pool_memory = ([^]u32)(mem)
+	pool_memory[PIXEL_OFFSET / 4] = 0
+
+	shm_pool = wl_proxy_marshal_flags(shm, WL_SHM_CREATE_POOL, &wl_shm_pool_interface, wl_proxy_get_version(shm), 0, nil, i32(fd), i32(POOL_SIZE))
+	pixel_buffer = wl_proxy_marshal_flags(shm_pool, WL_SHM_POOL_CREATE_BUFFER, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(PIXEL_OFFSET), i32(1), i32(1), i32(4), u32(WL_SHM_FORMAT_ARGB8888))
+	linux.close(fd)
+
+	current_output = outputs[0].proxy
+	if _, ok := capture(); !ok {
+		fail("screen capture failed\n")
+	}
+
+	//
+	// More Wayland setup, including a surface + a layer that covers the screen. The layer eats
+	// mouse presses and keyboard input. It does not show the crosshair and color preview, that is
+	// done using a "cursor".
+	//
+
+	if seat_capabilities & WL_SEAT_CAPABILITY_POINTER != 0 {
+		seat_pointer := wl_proxy_marshal_flags(seat, WL_SEAT_GET_POINTER, &wl_pointer_interface, wl_proxy_get_version(seat), 0, nil)
+		wl_listen(seat_pointer, &pointer_listener)
+	}
+	if seat_capabilities & WL_SEAT_CAPABILITY_KEYBOARD != 0 {
+		keyboard := wl_proxy_marshal_flags(seat, WL_SEAT_GET_KEYBOARD, &wl_keyboard_interface, wl_proxy_get_version(seat), 0, nil)
+		wl_listen(keyboard, &keyboard_listener)
+	}
+	data_device = wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE, &wl_data_device_interface, wl_proxy_get_version(data_device_manager), 0, nil, seat)
+	wl_listen(data_device, &data_device_listener)
+
+	surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
+	wl_listen(surface, &surface_listener)
+	viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, surface)
+	if fractional_scale_manager != nil {
+		fractional_scale := wl_proxy_marshal_flags(fractional_scale_manager, WL_FRACTIONAL_SCALE_MANAGER_GET_FRACTIONAL_SCALE, &wl_fractional_scale_interface, wl_proxy_get_version(fractional_scale_manager), 0, nil, surface)
+		wl_listen(fractional_scale, &fractional_scale_listener)
+	}
+
+	cursor_surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
+	cursor_viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, cursor_surface)
+	setup_scale()
+
+	layer_surface = wl_proxy_marshal_flags(layer_shell, WL_LAYER_SHELL_GET_LAYER_SURFACE, &wl_layer_surface_interface, wl_proxy_get_version(layer_shell), 0, nil, surface, nil, u32(WL_LAYER_SHELL_LAYER_OVERLAY), cstring("dock"))
+	wl_listen(layer_surface, &layer_surface_listener)
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_ANCHOR, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_ANCHOR_TOP | WL_LAYER_SURFACE_ANCHOR_BOTTOM | WL_LAYER_SURFACE_ANCHOR_LEFT | WL_LAYER_SURFACE_ANCHOR_RIGHT))
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_EXCLUSIVE_ZONE, nil, wl_proxy_get_version(layer_surface), 0, i32(-1))
+	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_KEYBOARD_INTERACTIVITY, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_KEYBOARD_INTERACTIVITY_EXCLUSIVE))
+	wl_proxy_marshal_flags(surface, WL_SURFACE_COMMIT, nil, wl_proxy_get_version(surface), 0)
+
+	fds := [Poll_Index]linux.Poll_Fd {
+		.Wayland = {fd = linux.Fd(wl_display_get_fd(display)), events = {.IN}},
+		.Toggle  = {fd = toggle_socket, events = {.IN}},
+	}
+	
+	for running {
+		for wl_display_prepare_read(display) != 0 {
+			wl_display_dispatch_pending(display)
+		}
+		wl_display_flush(display)
+		linux.poll(slice.enumerated_array(&fds), -1)
+		if fds[.Wayland].revents & {.ERR, .HUP, .NVAL} != {} && .IN not_in fds[.Wayland].revents {
+			wl_display_cancel_read(display)
+			break
+		}
+		if .IN in fds[.Wayland].revents {
+			if wl_display_read_events(display) == -1 {
+				break
+			}
+		} else {
+			wl_display_cancel_read(display)
+		}
+		wl_display_dispatch_pending(display)
+
+		//
+		// Check if another instance connected to us and in that case close the connection and flip
+		// the Hex/RGB mode
+		//
+
+		if .IN in fds[.Toggle].revents {
+			client, _ := linux.accept(toggle_socket, (^linux.Sock_Addr_Un)(nil))
+			linux.close(client)
+			mode = mode == .Hex ? .RGB : .Hex
+			dirty = true
+			for i in 1 ..= state_dir_len {
+				if i == state_dir_len || state_path[i] == '/' {
+					saved := state_path[i]
+					state_path[i] = 0
+					linux.mkdir(cstring(&state_path[0]), {.IRUSR, .IWUSR, .IXUSR})
+					state_path[i] = saved
+				}
+			}
+			if fd, err := linux.open(cstring(&state_path[0]), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR}); err == .NONE {
+				linux.write(fd, mode == .RGB ? []u8{'1'} : []u8{'0'})
+				linux.close(fd)
+			}
+		}
+
+		//
+		// The Wayland shenanigans aren't done setting up yet.
+		//
+
+		if !configured {
+			continue
+		}
+
+		//
+		// When someone clicks the mouse button, do a final capture and put the color in the
+		// clipboard. The program will be dormant (running == true) until the thing we put in the
+		// clipboard is no longer a clipboard source (see `source_cancelled`).
+		//
+
+		if mouse_went_down {
+			if rgb, ok := capture(); ok {
+				color = rgb
+			}
+			linux.close(toggle_socket)
+			write_text(color)
+			source := wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE, &wl_data_source_interface, wl_proxy_get_version(data_device_manager), 0, nil)
+			wl_listen(source, &source_listener)
+			wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain;charset=utf-8"))
+			wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain"))
+			wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("UTF8_STRING"))
+			clipboard_accepted = false
+			wl_proxy_marshal_flags(data_device, WL_DATA_DEVICE_SET_SELECTION, nil, wl_proxy_get_version(data_device), 0, source, pick_serial)
+			wl_display_roundtrip(display)
+			if !clipboard_accepted {
+				running = false
+			}
+			wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_DESTROY, nil, wl_proxy_get_version(layer_surface), WL_MARSHAL_FLAG_DESTROY)
+			wl_proxy_marshal_flags(surface, WL_SURFACE_DESTROY, nil, wl_proxy_get_version(surface), WL_MARSHAL_FLAG_DESTROY)
+			break
+		}
+
+		if moved && !frame_pending {
+			moved = false
+			if rgb, ok := capture(); ok {
+				color = rgb
+			}
+			dirty = true
+		}
+
+		if dirty && !frame_pending {
+			dirty = false
+			redraw()
+		}
+	}
+
+	for running && wl_display_dispatch(display) != -1 {
+	}
+}
+
+output_x, output_y: i32
+cursor_buffers: [2]^WL_Proxy
+cursor_busy: [2]bool
+pointer: ^WL_Proxy
+enter_serial: u32
+hot_x, hot_y: i32 = CROSS_HALF, CROSS_HALF
+drawn_color: u32 = 0xFFFFFFFF
+drawn_mode: Mode
+
+scale120: u32 = 120
+font_px, pad_x, text_x, advance, char_gap: int
+label_lw, label_lh, label_bw, label_bh: int
+box_lw, box_lh, box_bw, box_bh: int
+cross_px, cross_half, cross_gap: int
+
+width, height: i32
+cursor_x, cursor_y: i32
+cursor_fx, cursor_fy: f32
+text: [16]u8
+text_len: int
 
 GLYPH_CHARS := "0123456789ABCDEF#, "
 GLYPHS := [19][7]u8{
@@ -43,71 +335,7 @@ GLYPHS := [19][7]u8{
 	{0, 0, 0, 0, 0, 0, 0},
 }
 
-display: ^WL_Display
-compositor: ^WL_Proxy
-shm: ^WL_Proxy
-seat: ^WL_Proxy
-data_device_manager: ^WL_Proxy
-viewporter: ^WL_Proxy
-layer_shell: ^WL_Proxy
-fractional_scale_manager: ^WL_Proxy
-
-Output :: struct {
-	proxy:   ^WL_Proxy,
-	x, y:    i32,
-	refresh: i32,
-}
-outputs: [16]Output
-output_count: int
-output_x, output_y: i32
-current_output: ^WL_Proxy
-capture_interval_ns: i64 = 16_666_666
-next_capture_ns: i64
-shm_pool: ^WL_Proxy
-
-surface: ^WL_Proxy
-layer_surface: ^WL_Proxy
-viewport: ^WL_Proxy
-cursor_surface: ^WL_Proxy
-cursor_viewport: ^WL_Proxy
-pixel_buffer: ^WL_Proxy
-cursor_buffers: [2]^WL_Proxy
-cursor_busy: [2]bool
-pool_memory: [^]u32
-pointer: ^WL_Proxy
-enter_serial: u32
-hot_x, hot_y: i32 = CROSS_HALF, CROSS_HALF
-drawn_color: u32 = 0xFFFFFFFF
-drawn_rgb_mode: bool
-
-scale120: u32 = 120
-scale_changed: bool
-font_px, pad_x, text_x, advance, char_gap: int
-label_lw, label_lh, label_bw, label_bh: int
-box_lw, box_lh, box_bw, box_bh: int
-cross_px, cross_half, cross_gap: int
-
-width, height: i32
-cursor_x, cursor_y: i32
-cursor_fx, cursor_fy: f32
-moved: bool
-dirty: bool
-frame_pending: bool
-color: u32
-text: [16]u8
-text_len: int
-rgb_mode: bool
-toggle_socket: linux.Fd
-state_path: [256]u8
-state_dir_len: int
-running := true
-picked: bool
-pick_pending: bool
-pick_serial: u32
-selection_seen: bool
-
 registry_global :: proc "c" (data: rawptr, registry: ^WL_Proxy, name: u32, interface: cstring, version: u32) {
-	context = runtime.default_context()
 	switch string(interface) {
 	case "wl_compositor":
 		compositor = wl_bind(registry, name, &wl_compositor_interface, version)
@@ -156,19 +384,8 @@ output_geometry :: proc "c" (data: rawptr, o: ^WL_Proxy, x, y, physical_width, p
 		}
 	}
 }
-output_mode :: proc "c" (data: rawptr, o: ^WL_Proxy, flags: u32, w, h, refresh: i32) {
-	if flags & WL_OUTPUT_MODE_CURRENT == 0 || refresh <= 0 {
-		return
-	}
-	for &out in outputs[:output_count] {
-		if out.proxy == o {
-			out.refresh = refresh
-		}
-	}
-}
 output_listener := WL_Output_Listener{
 	geometry = output_geometry,
-	mode     = output_mode,
 }
 
 surface_enter :: proc "c" (data: rawptr, s: ^WL_Proxy, o: ^WL_Proxy) {
@@ -177,9 +394,6 @@ surface_enter :: proc "c" (data: rawptr, s: ^WL_Proxy, o: ^WL_Proxy) {
 			output_x = out.x
 			current_output = o
 			output_y = out.y
-			if out.refresh > 0 {
-				capture_interval_ns = 1_000_000_000_000 / i64(out.refresh)
-			}
 			moved = true
 		}
 	}
@@ -191,6 +405,7 @@ surface_listener := WL_Surface_Listener{
 layer_configure :: proc "c" (data: rawptr, ls: ^WL_Proxy, serial: u32, w: u32, h: u32) {
 	width = i32(w)
 	height = i32(h)
+	configured = true
 	wl_proxy_marshal_flags(ls, WL_LAYER_SURFACE_ACK_CONFIGURE, nil, wl_proxy_get_version(ls), 0, serial)
 	wl_proxy_marshal_flags(viewport, WL_VIEWPORT_SET_DESTINATION, nil, wl_proxy_get_version(viewport), 0, width, height)
 	wl_proxy_marshal_flags(surface, WL_SURFACE_ATTACH, nil, wl_proxy_get_version(surface), 0, pixel_buffer, i32(0), i32(0))
@@ -210,7 +425,8 @@ fractional_preferred_scale :: proc "c" (data: rawptr, fs: ^WL_Proxy, scale: u32)
 	clamped := clamp(scale, 120, MAX_SCALE * 120)
 	if clamped != scale120 {
 		scale120 = clamped
-		scale_changed = true
+		setup_scale()
+		dirty = true
 	}
 }
 fractional_scale_listener := WL_Fractional_Scale_Listener {
@@ -257,11 +473,11 @@ set_cursor_position :: proc "contextless" (x, y: WL_Fixed) {
 }
 
 pointer_button :: proc "c" (data: rawptr, p: ^WL_Proxy, serial: u32, time: u32, button: u32, state: u32) {
-	if state != WL_POINTER_BUTTON_STATE_PRESSED || picked {
+	if state != WL_POINTER_BUTTON_STATE_PRESSED || mouse_went_down {
 		return
 	}
 	if button == BTN_LEFT {
-		pick_pending = true
+		mouse_went_down = true
 		pick_serial = serial
 	} else {
 		running = false
@@ -278,7 +494,7 @@ keyboard_keymap :: proc "c" (data: rawptr, k: ^WL_Proxy, format: u32, fd: i32, s
 }
 
 keyboard_key :: proc "c" (data: rawptr, k: ^WL_Proxy, serial: u32, time: u32, key: u32, state: u32) {
-	if key == KEY_ESC && state == WL_KEYBOARD_KEY_STATE_PRESSED && !picked {
+	if key == KEY_ESC && state == WL_KEYBOARD_KEY_STATE_PRESSED && !mouse_went_down {
 		running = false
 	}
 }
@@ -304,7 +520,7 @@ data_device: ^WL_Proxy
 
 data_device_selection :: proc "c" (data: rawptr, dd: ^WL_Proxy, offer: ^WL_Proxy) {
 	if offer != nil {
-		selection_seen = true
+		clipboard_accepted = true
 		wl_proxy_marshal_flags(offer, WL_DATA_OFFER_DESTROY, nil, wl_proxy_get_version(offer), WL_MARSHAL_FLAG_DESTROY)
 	}
 }
@@ -312,28 +528,9 @@ data_device_listener := WL_Data_Device_Listener {
 	selection = data_device_selection,
 }
 
-pick :: proc(serial: u32) {
-	picked = true
-	linux.close(toggle_socket)
-	write_text(color)
-	source := wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_CREATE_DATA_SOURCE, &wl_data_source_interface, wl_proxy_get_version(data_device_manager), 0, nil)
-	wl_listen(source, &source_listener)
-	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain;charset=utf-8"))
-	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("text/plain"))
-	wl_proxy_marshal_flags(source, WL_DATA_SOURCE_OFFER, nil, wl_proxy_get_version(source), 0, cstring("UTF8_STRING"))
-	selection_seen = false
-	wl_proxy_marshal_flags(data_device, WL_DATA_DEVICE_SET_SELECTION, nil, wl_proxy_get_version(data_device), 0, source, serial)
-	wl_display_roundtrip(display)
-	if !selection_seen {
-		running = false
-	}
-	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_DESTROY, nil, wl_proxy_get_version(layer_surface), WL_MARSHAL_FLAG_DESTROY)
-	wl_proxy_marshal_flags(surface, WL_SURFACE_DESTROY, nil, wl_proxy_get_version(surface), WL_MARSHAL_FLAG_DESTROY)
-}
-
 write_text :: proc "contextless" (rgb: u32) {
 	digits := GLYPH_CHARS
-	if !rgb_mode {
+	if mode == .Hex {
 		text[0] = '#'
 		for i in 0 ..< 6 {
 			text[1 + i] = digits[(rgb >> (20 - 4 * u32(i))) & 0xF]
@@ -362,33 +559,33 @@ write_text :: proc "contextless" (rgb: u32) {
 	}
 }
 
-scaled :: proc(v: int) -> int {
+logical_to_buffer :: proc "contextless" (v: int) -> int {
 	return (v * int(scale120) + 60) / 120
 }
 
-logical :: proc(px: int) -> int {
+buffer_to_logical :: proc "contextless" (px: int) -> int {
 	return (px * 120 + int(scale120) - 1) / int(scale120)
 }
 
-setup_scale :: proc() {
-	font_px = max(1, scaled(2))
-	pad_x = scaled(5)
-	char_gap = scaled(2)
-	text_x = pad_x + 7 * font_px + scaled(6)
+setup_scale :: proc "contextless" () {
+	font_px = max(1, logical_to_buffer(2))
+	pad_x = logical_to_buffer(5)
+	char_gap = logical_to_buffer(2)
+	text_x = pad_x + 7 * font_px + logical_to_buffer(6)
 	advance = 5 * font_px + char_gap
-	label_lw = logical(text_x + 13 * advance - char_gap + pad_x)
-	label_lh = logical(7 * font_px + 2 * scaled(5))
-	label_bw = min(scaled(label_lw), LABEL_MAX_W)
-	label_bh = min(scaled(label_lh), LABEL_MAX_H)
+	label_lw = buffer_to_logical(text_x + 13 * advance - char_gap + pad_x)
+	label_lh = buffer_to_logical(7 * font_px + 2 * logical_to_buffer(5))
+	label_bw = min(logical_to_buffer(label_lw), LABEL_MAX_W)
+	label_bh = min(logical_to_buffer(label_lh), LABEL_MAX_H)
 
-	cross_px = scaled(CROSS)
-	cross_half = max(1, scaled(1))
-	cross_gap = max(scaled(2), cross_half + 1)
+	cross_px = logical_to_buffer(CROSS)
+	cross_half = max(1, logical_to_buffer(1))
+	cross_gap = max(logical_to_buffer(2), cross_half + 1)
 
 	box_lw = CROSS_HALF + LABEL_OFFSET + label_lw
 	box_lh = CROSS_HALF + LABEL_OFFSET + label_lh
-	box_bw = min(scaled(box_lw), CURSOR_MAX_W)
-	box_bh = min(scaled(box_lh), CURSOR_MAX_H)
+	box_bw = min(logical_to_buffer(box_lw), CURSOR_MAX_W)
+	box_bh = min(logical_to_buffer(box_lh), CURSOR_MAX_H)
 
 	for i in 0 ..< 2 {
 		if cursor_buffers[i] != nil {
@@ -408,97 +605,93 @@ put_px :: proc(px: [^]u32, x, y: int, c: u32) {
 	}
 }
 
-draw_cursor :: proc(px: [^]u32, rgb: u32, used: int, left, above: bool) {
-	for i in 0 ..< box_bw * box_bh {
-		px[i] = 0
-	}
-
-	hx := scaled(int(hot_x))
-	hy := scaled(int(hot_y))
-	c := cross_px / 2
-	for y in 0 ..< cross_px {
-		for x in 0 ..< cross_px {
-			dx := abs(x - c)
-			dy := abs(y - c)
-			if (dx <= cross_half && dy >= cross_gap) || (dy <= cross_half && dx >= cross_gap) {
-				put_px(px, hx - c + x, hy - c + y, min(dx, dy) < cross_half ? 0x80808080 : 0x80000000)
-			}
-		}
-	}
-
-	lx := left ? hx - scaled(LABEL_OFFSET) - used : hx + scaled(LABEL_OFFSET)
-	ly := above ? hy - scaled(LABEL_OFFSET) - label_bh : hy + scaled(LABEL_OFFSET)
-	pad_y := (label_bh - 7 * font_px) / 2
-	for y in 0 ..< label_bh {
-		for x in 0 ..< used {
-			put_px(px, lx + x, ly + y, 0x99000000)
-		}
-	}
-	for y in 0 ..< 7 * font_px {
-		for x in 0 ..< 7 * font_px {
-			put_px(px, lx + pad_x + x, ly + pad_y + y, 0xFF000000 | rgb)
-		}
-	}
-	pen := lx + text_x
-	for ch in text[:text_len] {
-		g := 18
-		for k in 0 ..< len(GLYPH_CHARS) {
-			if GLYPH_CHARS[k] == ch {
-				g = k
-			}
-		}
-		for row in 0 ..< 7 {
-			for col in 0 ..< 5 {
-				if GLYPHS[g][row] & (0b10000 >> u8(col)) == 0 {
-					continue
-				}
-				for sy in 0 ..< font_px {
-					for sx in 0 ..< font_px {
-						put_px(px, pen + col * font_px + sx, ly + pad_y + row * font_px + sy, 0xFFFFFFFF)
-					}
-				}
-			}
-		}
-		pen += advance
-	}
-}
-
 redraw :: proc() {
 	write_text(color)
 	used := min(text_x + text_len * advance - char_gap + pad_x, label_bw)
-	left := cursor_x + LABEL_OFFSET + i32(logical(used)) > width
+	left := cursor_x + LABEL_OFFSET + i32(buffer_to_logical(used)) > width
 	above := cursor_y + LABEL_OFFSET + i32(label_lh) > height
 	hx := left ? i32(LABEL_OFFSET + label_lw) : i32(CROSS_HALF)
 	hy := above ? i32(LABEL_OFFSET + label_lh) : i32(CROSS_HALF)
 	hot_changed := hx != hot_x || hy != hot_y
-	if !hot_changed && color == drawn_color && rgb_mode == drawn_rgb_mode {
-		return
-	}
-
-	b := -1
-	for i in 0 ..< 2 {
-		if !cursor_busy[i] {
-			b = i
-			break
+	if hot_changed || color != drawn_color || mode != drawn_mode {
+		b := -1
+		for i in 0 ..< 2 {
+			if !cursor_busy[i] {
+				b = i
+				break
+			}
 		}
-	}
-	if b < 0 {
-		dirty = true
-		return
-	}
+		if b < 0 {
+			dirty = true
+			return
+		}
 
-	hot_x = hx
-	hot_y = hy
-	drawn_color = color
-	drawn_rgb_mode = rgb_mode
+		hot_x = hx
+		hot_y = hy
+		drawn_color = color
+		drawn_mode = mode
 
-	draw_cursor(pool_memory[b * CURSOR_MAX_SIZE / 4:], color, used, left, above)
-	cursor_busy[b] = true
+		px := pool_memory[b * CURSOR_MAX_SIZE / 4:]
+		for i in 0 ..< box_bw * box_bh {
+			px[i] = 0
+		}
 
-	wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_ATTACH, nil, wl_proxy_get_version(cursor_surface), 0, cursor_buffers[b], i32(0), i32(0))
-	wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_DAMAGE_BUFFER, nil, wl_proxy_get_version(cursor_surface), 0, i32(0), i32(0), i32(box_bw), i32(box_bh))
-	if hot_changed && pointer != nil {
-		wl_proxy_marshal_flags(pointer, WL_POINTER_SET_CURSOR, nil, wl_proxy_get_version(pointer), 0, enter_serial, cursor_surface, hot_x, hot_y)
+		hot_bx := logical_to_buffer(int(hot_x))
+		hot_by := logical_to_buffer(int(hot_y))
+		c := cross_px / 2
+		for y in 0 ..< cross_px {
+			for x in 0 ..< cross_px {
+				dx := abs(x - c)
+				dy := abs(y - c)
+				if (dx <= cross_half && dy >= cross_gap) || (dy <= cross_half && dx >= cross_gap) {
+					put_px(px, hot_bx - c + x, hot_by - c + y, min(dx, dy) < cross_half ? 0x80808080 : 0x80000000)
+				}
+			}
+		}
+
+		lx := left ? hot_bx - logical_to_buffer(LABEL_OFFSET) - used : hot_bx + logical_to_buffer(LABEL_OFFSET)
+		ly := above ? hot_by - logical_to_buffer(LABEL_OFFSET) - label_bh : hot_by + logical_to_buffer(LABEL_OFFSET)
+		pad_y := (label_bh - 7 * font_px) / 2
+		for y in 0 ..< label_bh {
+			for x in 0 ..< used {
+				put_px(px, lx + x, ly + y, 0x99000000)
+			}
+		}
+		for y in 0 ..< 7 * font_px {
+			for x in 0 ..< 7 * font_px {
+				put_px(px, lx + pad_x + x, ly + pad_y + y, 0xFF000000 | color)
+			}
+		}
+		pen := lx + text_x
+		for ch in text[:text_len] {
+			g := 18
+			for k in 0 ..< len(GLYPH_CHARS) {
+				if GLYPH_CHARS[k] == ch {
+					g = k
+				}
+			}
+			for row in 0 ..< 7 {
+				for col in 0 ..< 5 {
+					if GLYPHS[g][row] & (0b10000 >> u8(col)) == 0 {
+						continue
+					}
+					for sy in 0 ..< font_px {
+						for sx in 0 ..< font_px {
+							put_px(px, pen + col * font_px + sx, ly + pad_y + row * font_px + sy, 0xFFFFFFFF)
+						}
+					}
+				}
+			}
+			pen += advance
+		}
+
+		cursor_busy[b] = true
+
+		wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_ATTACH, nil, wl_proxy_get_version(cursor_surface), 0, cursor_buffers[b], i32(0), i32(0))
+		wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_DAMAGE_BUFFER, nil, wl_proxy_get_version(cursor_surface), 0, i32(0), i32(0), i32(box_bw), i32(box_bh))
+		if hot_changed && pointer != nil {
+			wl_proxy_marshal_flags(pointer, WL_POINTER_SET_CURSOR, nil, wl_proxy_get_version(pointer), 0, enter_serial, cursor_surface, hot_x, hot_y)
+		}
 	}
 	frame := wl_proxy_marshal_flags(cursor_surface, WL_SURFACE_FRAME, &wl_callback_interface, wl_proxy_get_version(cursor_surface), 0, nil)
 	wl_listen(frame, &frame_listener)
@@ -513,182 +706,7 @@ capture :: proc() -> (rgb: u32, ok: bool) {
 	return dbus_kde_capture_pixel(output_x + cursor_x, output_y + cursor_y, cursor_fx, cursor_fy)
 }
 
-now_ns :: proc() -> i64 {
-	ts, _ := linux.clock_gettime(.MONOTONIC)
-	return i64(ts.time_sec) * 1_000_000_000 + i64(ts.time_nsec)
-}
-
 fail :: proc(msg: string) -> ! {
 	linux.write(2, transmute([]u8)msg)
 	linux.exit(1)
-}
-
-main :: proc() {
-	libc.signal(SIGPIPE, transmute(proc "c" (i32))libc.SIG_IGN)
-
-	addr := linux.Sock_Addr_Un{sun_family = .UNIX}
-	copy(addr.sun_path[1:], "minimal_colorpicker")
-	toggle_socket, _ = linux.socket(.UNIX, .STREAM, {.CLOEXEC, .NONBLOCK}, .HOPOPT)
-	if linux.bind(toggle_socket, &addr) != .NONE {
-		linux.connect(toggle_socket, &addr)
-		return
-	}
-	linux.listen(toggle_socket, 4)
-
-	if xdg := string(libc.getenv("XDG_STATE_HOME")); len(xdg) > 0 && xdg[0] == '/' {
-		state_dir_len = copy(state_path[:200], xdg)
-	} else {
-		state_dir_len = copy(state_path[:200], string(libc.getenv("HOME")))
-		state_dir_len += copy(state_path[state_dir_len:200], "/.local/state")
-	}
-	copy(state_path[state_dir_len:255], "/minimal_colorpicker")
-	if fd, err := linux.open(cstring(&state_path[0]), {}); err == .NONE {
-		b: [1]u8
-		linux.read(fd, b[:])
-		linux.close(fd)
-		rgb_mode = b[0] == '1'
-	}
-
-	display = wl_display_connect(nil)
-	if display == nil {
-		fail("no wayland display\n")
-	}
-
-	registry := wl_proxy_marshal_flags((^WL_Proxy)(display), WL_DISPLAY_GET_REGISTRY, &wl_registry_interface, wl_proxy_get_version((^WL_Proxy)(display)), 0, nil)
-	wl_listen(registry, &registry_listener)
-	wl_display_roundtrip(display)
-	wl_display_roundtrip(display)
-
-	if compositor == nil || shm == nil || seat == nil || data_device_manager == nil || viewporter == nil || layer_shell == nil {
-		fail("missing wayland globals\n")
-	}
-	if output_count == 0 {
-		fail("no outputs\n")
-	}
-
-	fd, err := linux.memfd_create("minimal_colorpicker", {.CLOEXEC})
-	if err != .NONE {
-		fail("memfd_create failed\n")
-	}
-	linux.ftruncate(fd, POOL_SIZE)
-	mem, merr := linux.mmap(0, POOL_SIZE, {.READ, .WRITE}, {.SHARED}, fd)
-	if merr != .NONE {
-		fail("mmap failed\n")
-	}
-	pool_memory = ([^]u32)(mem)
-	pool_memory[PIXEL_OFFSET / 4] = 0
-
-	shm_pool = wl_proxy_marshal_flags(shm, WL_SHM_CREATE_POOL, &wl_shm_pool_interface, wl_proxy_get_version(shm), 0, nil, i32(fd), i32(POOL_SIZE))
-	pixel_buffer = wl_proxy_marshal_flags(shm_pool, WL_SHM_POOL_CREATE_BUFFER, &wl_buffer_interface, wl_proxy_get_version(shm_pool), 0, nil, i32(PIXEL_OFFSET), i32(1), i32(1), i32(4), u32(WL_SHM_FORMAT_ARGB8888))
-	linux.close(fd)
-
-	current_output = outputs[0].proxy
-	if _, ok := capture(); !ok {
-		fail("screen capture failed\n")
-	}
-
-	if seat_capabilities & WL_SEAT_CAPABILITY_POINTER != 0 {
-		seat_pointer := wl_proxy_marshal_flags(seat, WL_SEAT_GET_POINTER, &wl_pointer_interface, wl_proxy_get_version(seat), 0, nil)
-		wl_listen(seat_pointer, &pointer_listener)
-	}
-	if seat_capabilities & WL_SEAT_CAPABILITY_KEYBOARD != 0 {
-		keyboard := wl_proxy_marshal_flags(seat, WL_SEAT_GET_KEYBOARD, &wl_keyboard_interface, wl_proxy_get_version(seat), 0, nil)
-		wl_listen(keyboard, &keyboard_listener)
-	}
-	data_device = wl_proxy_marshal_flags(data_device_manager, WL_DATA_DEVICE_MANAGER_GET_DATA_DEVICE, &wl_data_device_interface, wl_proxy_get_version(data_device_manager), 0, nil, seat)
-	wl_listen(data_device, &data_device_listener)
-
-	surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
-	wl_listen(surface, &surface_listener)
-	viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, surface)
-	if fractional_scale_manager != nil {
-		fractional_scale := wl_proxy_marshal_flags(fractional_scale_manager, WL_FRACTIONAL_SCALE_MANAGER_GET_FRACTIONAL_SCALE, &wl_fractional_scale_interface, wl_proxy_get_version(fractional_scale_manager), 0, nil, surface)
-		wl_listen(fractional_scale, &fractional_scale_listener)
-	}
-
-	cursor_surface = wl_proxy_marshal_flags(compositor, WL_COMPOSITOR_CREATE_SURFACE, &wl_surface_interface, wl_proxy_get_version(compositor), 0, nil)
-	cursor_viewport = wl_proxy_marshal_flags(viewporter, WL_VIEWPORTER_GET_VIEWPORT, &wl_viewport_interface, wl_proxy_get_version(viewporter), 0, nil, cursor_surface)
-	setup_scale()
-
-	layer_surface = wl_proxy_marshal_flags(layer_shell, WL_LAYER_SHELL_GET_LAYER_SURFACE, &wl_layer_surface_interface, wl_proxy_get_version(layer_shell), 0, nil, surface, nil, u32(WL_LAYER_SHELL_LAYER_OVERLAY), cstring("dock"))
-	wl_listen(layer_surface, &layer_surface_listener)
-	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_ANCHOR, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_ANCHOR_TOP | WL_LAYER_SURFACE_ANCHOR_BOTTOM | WL_LAYER_SURFACE_ANCHOR_LEFT | WL_LAYER_SURFACE_ANCHOR_RIGHT))
-	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_EXCLUSIVE_ZONE, nil, wl_proxy_get_version(layer_surface), 0, i32(-1))
-	wl_proxy_marshal_flags(layer_surface, WL_LAYER_SURFACE_SET_KEYBOARD_INTERACTIVITY, nil, wl_proxy_get_version(layer_surface), 0, u32(WL_LAYER_SURFACE_KEYBOARD_INTERACTIVITY_EXCLUSIVE))
-	wl_proxy_marshal_flags(surface, WL_SURFACE_COMMIT, nil, wl_proxy_get_version(surface), 0)
-
-	fds := [2]linux.Poll_Fd{{fd = linux.Fd(wl_display_get_fd(display)), events = {.IN}}, {fd = toggle_socket, events = {.IN}}}
-	for running {
-		for wl_display_prepare_read(display) != 0 {
-			wl_display_dispatch_pending(display)
-		}
-		wl_display_flush(display)
-		fds[1].fd = picked ? -1 : toggle_socket
-		timeout := i32(-1)
-		if moved && !picked && width > 0 {
-			timeout = i32(max(0, (next_capture_ns - now_ns() + 999_999) / 1_000_000))
-		}
-		linux.poll(fds[:], timeout)
-		if fds[0].revents & {.ERR, .HUP, .NVAL} != {} && .IN not_in fds[0].revents {
-			wl_display_cancel_read(display)
-			break
-		}
-		if .IN in fds[0].revents {
-			if wl_display_read_events(display) == -1 {
-				break
-			}
-		} else {
-			wl_display_cancel_read(display)
-		}
-		wl_display_dispatch_pending(display)
-		if .IN in fds[1].revents && !picked {
-			client, _ := linux.accept(toggle_socket, (^linux.Sock_Addr_Un)(nil))
-			linux.close(client)
-			rgb_mode = !rgb_mode
-			dirty = true
-			for i in 1 ..= state_dir_len {
-				if i == state_dir_len || state_path[i] == '/' {
-					saved := state_path[i]
-					state_path[i] = 0
-					linux.mkdir(cstring(&state_path[0]), {.IRUSR, .IWUSR, .IXUSR})
-					state_path[i] = saved
-				}
-			}
-			if fd, err := linux.open(cstring(&state_path[0]), {.WRONLY, .CREAT, .TRUNC}, {.IRUSR, .IWUSR}); err == .NONE {
-				linux.write(fd, rgb_mode ? []u8{'1'} : []u8{'0'})
-				linux.close(fd)
-			}
-		}
-		if picked || width == 0 {
-			continue
-		}
-		if scale_changed {
-			scale_changed = false
-			setup_scale()
-			dirty = true
-		}
-		if pick_pending {
-			pick_pending = false
-			if moved {
-				moved = false
-				if rgb, ok := capture(); ok {
-					color = rgb
-				}
-			}
-			pick(pick_serial)
-			continue
-		}
-		if moved && now_ns() >= next_capture_ns {
-			moved = false
-			next_capture_ns = now_ns() + capture_interval_ns
-			if rgb, ok := capture(); ok {
-				color = rgb
-			}
-			dirty = true
-		}
-		if dirty && !frame_pending {
-			dirty = false
-			redraw()
-		}
-	}
 }
