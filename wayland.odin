@@ -85,17 +85,12 @@ wl_compositor_interface := WL_Interface{"wl_compositor", 4, 2, raw_data([]WL_Mes
 }), 0, nil}
 
 WL_COMPOSITOR_CREATE_SURFACE :: 0
-WL_COMPOSITOR_CREATE_REGION :: 1
 
 wl_region_interface := WL_Interface{"wl_region", 1, 3, raw_data([]WL_Message{
 	{"destroy", "", WL_NO_TYPES},
 	{"add", "iiii", WL_NO_TYPES},
 	{"subtract", "iiii", WL_NO_TYPES},
 }), 0, nil}
-
-WL_REGION_DESTROY :: 0
-WL_REGION_ADD :: 1
-WL_REGION_SUBTRACT :: 2
 
 wl_buffer_interface := WL_Interface{"wl_buffer", 1, 1, raw_data([]WL_Message{
 	{"destroy", "", WL_NO_TYPES},
@@ -123,38 +118,9 @@ wl_surface_interface := WL_Interface{"wl_surface", 4, 10, raw_data([]WL_Message{
 
 WL_SURFACE_DESTROY :: 0
 WL_SURFACE_ATTACH :: 1
-WL_SURFACE_DAMAGE :: 2
 WL_SURFACE_FRAME :: 3
-WL_SURFACE_SET_OPAQUE_REGION :: 4
-WL_SURFACE_SET_INPUT_REGION :: 5
 WL_SURFACE_COMMIT :: 6
-WL_SURFACE_SET_BUFFER_TRANSFORM :: 7
-WL_SURFACE_SET_BUFFER_SCALE :: 8
 WL_SURFACE_DAMAGE_BUFFER :: 9
-
-wl_subcompositor_interface := WL_Interface{"wl_subcompositor", 1, 2, raw_data([]WL_Message{
-	{"destroy", "", WL_NO_TYPES},
-	{"get_subsurface", "noo", raw_data([]^WL_Interface{&wl_subsurface_interface, &wl_surface_interface, &wl_surface_interface})},
-}), 0, nil}
-
-WL_SUBCOMPOSITOR_DESTROY :: 0
-WL_SUBCOMPOSITOR_GET_SUBSURFACE :: 1
-
-wl_subsurface_interface := WL_Interface{"wl_subsurface", 1, 6, raw_data([]WL_Message{
-	{"destroy", "", WL_NO_TYPES},
-	{"set_position", "ii", WL_NO_TYPES},
-	{"place_above", "o", raw_data([]^WL_Interface{&wl_surface_interface})},
-	{"place_below", "o", raw_data([]^WL_Interface{&wl_surface_interface})},
-	{"set_sync", "", WL_NO_TYPES},
-	{"set_desync", "", WL_NO_TYPES},
-}), 0, nil}
-
-WL_SUBSURFACE_DESTROY :: 0
-WL_SUBSURFACE_SET_POSITION :: 1
-WL_SUBSURFACE_PLACE_ABOVE :: 2
-WL_SUBSURFACE_PLACE_BELOW :: 3
-WL_SUBSURFACE_SET_SYNC :: 4
-WL_SUBSURFACE_SET_DESYNC :: 5
 
 wl_shm_interface := WL_Interface{"wl_shm", 1, 1, raw_data([]WL_Message{
 	{"create_pool", "nhi", raw_data([]^WL_Interface{&wl_shm_pool_interface, nil, nil})},
@@ -171,8 +137,6 @@ wl_shm_pool_interface := WL_Interface{"wl_shm_pool", 1, 3, raw_data([]WL_Message
 }), 0, nil}
 
 WL_SHM_POOL_CREATE_BUFFER :: 0
-WL_SHM_POOL_DESTROY :: 1
-WL_SHM_POOL_RESIZE :: 2
 
 wl_seat_interface := WL_Interface{"wl_seat", 5, 4, raw_data([]WL_Message{
 	{"get_pointer", "n", raw_data([]^WL_Interface{&wl_pointer_interface})},
@@ -186,8 +150,6 @@ wl_seat_interface := WL_Interface{"wl_seat", 5, 4, raw_data([]WL_Message{
 
 WL_SEAT_GET_POINTER :: 0
 WL_SEAT_GET_KEYBOARD :: 1
-WL_SEAT_GET_TOUCH :: 2
-WL_SEAT_RELEASE :: 3
 
 wl_pointer_interface := WL_Interface{"wl_pointer", 5, 2, raw_data([]WL_Message{
 	{"set_cursor", "u?oii", raw_data([]^WL_Interface{nil, &wl_surface_interface, nil, nil})},
@@ -205,7 +167,6 @@ wl_pointer_interface := WL_Interface{"wl_pointer", 5, 2, raw_data([]WL_Message{
 })}
 
 WL_POINTER_SET_CURSOR :: 0
-WL_POINTER_RELEASE :: 1
 
 wl_keyboard_interface := WL_Interface{"wl_keyboard", 5, 1, raw_data([]WL_Message{
 	{"release", "3", WL_NO_TYPES},
@@ -218,13 +179,9 @@ wl_keyboard_interface := WL_Interface{"wl_keyboard", 5, 1, raw_data([]WL_Message
 	{"repeat_info", "4ii", WL_NO_TYPES},
 })}
 
-WL_KEYBOARD_RELEASE :: 0
-
 wl_touch_interface := WL_Interface{"wl_touch", 5, 1, raw_data([]WL_Message{
 	{"release", "3", WL_NO_TYPES},
 }), 0, nil}
-
-WL_TOUCH_RELEASE :: 0
 
 wl_output_interface := WL_Interface{"wl_output", 3, 1, raw_data([]WL_Message{
 	{"release", "3", WL_NO_TYPES},
@@ -234,8 +191,6 @@ wl_output_interface := WL_Interface{"wl_output", 3, 1, raw_data([]WL_Message{
 	{"done", "2", WL_NO_TYPES},
 	{"scale", "2i", WL_NO_TYPES},
 })}
-
-WL_OUTPUT_RELEASE :: 0
 
 wl_data_device_manager_interface := WL_Interface{"wl_data_device_manager", 3, 2, raw_data([]WL_Message{
 	{"create_data_source", "n", raw_data([]^WL_Interface{&wl_data_source_interface})},
@@ -259,8 +214,6 @@ wl_data_source_interface := WL_Interface{"wl_data_source", 3, 3, raw_data([]WL_M
 })}
 
 WL_DATA_SOURCE_OFFER :: 0
-WL_DATA_SOURCE_DESTROY :: 1
-WL_DATA_SOURCE_SET_ACTIONS :: 2
 
 wl_data_offer_interface := WL_Interface{"wl_data_offer", 3, 5, raw_data([]WL_Message{
 	{"accept", "u?s", WL_NO_TYPES},
@@ -274,11 +227,7 @@ wl_data_offer_interface := WL_Interface{"wl_data_offer", 3, 5, raw_data([]WL_Mes
 	{"action", "3u", WL_NO_TYPES},
 })}
 
-WL_DATA_OFFER_ACCEPT :: 0
-WL_DATA_OFFER_RECEIVE :: 1
 WL_DATA_OFFER_DESTROY :: 2
-WL_DATA_OFFER_FINISH :: 3
-WL_DATA_OFFER_SET_ACTIONS :: 4
 
 wl_data_device_interface := WL_Interface{"wl_data_device", 3, 3, raw_data([]WL_Message{
 	{"start_drag", "?oo?ou", raw_data([]^WL_Interface{&wl_data_source_interface, &wl_surface_interface, &wl_surface_interface, nil})},
@@ -293,16 +242,13 @@ wl_data_device_interface := WL_Interface{"wl_data_device", 3, 3, raw_data([]WL_M
 	{"selection", "?o", raw_data([]^WL_Interface{&wl_data_offer_interface})},
 })}
 
-WL_DATA_DEVICE_START_DRAG :: 0
 WL_DATA_DEVICE_SET_SELECTION :: 1
-WL_DATA_DEVICE_RELEASE :: 2
 
 wl_viewporter_interface := WL_Interface{"wp_viewporter", 1, 2, raw_data([]WL_Message{
 	{"destroy", "", WL_NO_TYPES},
 	{"get_viewport", "no", raw_data([]^WL_Interface{&wl_viewport_interface, &wl_surface_interface})},
 }), 0, nil}
 
-WL_VIEWPORTER_DESTROY :: 0
 WL_VIEWPORTER_GET_VIEWPORT :: 1
 
 wl_viewport_interface := WL_Interface{"wp_viewport", 1, 3, raw_data([]WL_Message{
@@ -311,8 +257,6 @@ wl_viewport_interface := WL_Interface{"wp_viewport", 1, 3, raw_data([]WL_Message
 	{"set_destination", "ii", WL_NO_TYPES},
 }), 0, nil}
 
-WL_VIEWPORT_DESTROY :: 0
-WL_VIEWPORT_SET_SOURCE :: 1
 WL_VIEWPORT_SET_DESTINATION :: 2
 
 wl_layer_shell_interface := WL_Interface{"zwlr_layer_shell_v1", 4, 2, raw_data([]WL_Message{
@@ -321,7 +265,6 @@ wl_layer_shell_interface := WL_Interface{"zwlr_layer_shell_v1", 4, 2, raw_data([
 }), 0, nil}
 
 WL_LAYER_SHELL_GET_LAYER_SURFACE :: 0
-WL_LAYER_SHELL_DESTROY :: 1
 
 wl_layer_surface_interface := WL_Interface{"zwlr_layer_surface_v1", 4, 9, raw_data([]WL_Message{
 	{"set_size", "uu", WL_NO_TYPES},
@@ -338,15 +281,11 @@ wl_layer_surface_interface := WL_Interface{"zwlr_layer_surface_v1", 4, 9, raw_da
 	{"closed", "", WL_NO_TYPES},
 })}
 
-WL_LAYER_SURFACE_SET_SIZE :: 0
 WL_LAYER_SURFACE_SET_ANCHOR :: 1
 WL_LAYER_SURFACE_SET_EXCLUSIVE_ZONE :: 2
-WL_LAYER_SURFACE_SET_MARGIN :: 3
 WL_LAYER_SURFACE_SET_KEYBOARD_INTERACTIVITY :: 4
-WL_LAYER_SURFACE_GET_POPUP :: 5
 WL_LAYER_SURFACE_ACK_CONFIGURE :: 6
 WL_LAYER_SURFACE_DESTROY :: 7
-WL_LAYER_SURFACE_SET_LAYER :: 8
 
 wl_screencopy_manager_interface := WL_Interface{"zwlr_screencopy_manager_v1", 3, 3, raw_data([]WL_Message{
 	{"capture_output", "nio", raw_data([]^WL_Interface{&wl_screencopy_frame_interface, nil, &wl_output_interface})},
@@ -354,9 +293,7 @@ wl_screencopy_manager_interface := WL_Interface{"zwlr_screencopy_manager_v1", 3,
 	{"destroy", "", WL_NO_TYPES},
 }), 0, nil}
 
-WL_SCREENCOPY_MANAGER_CAPTURE_OUTPUT :: 0
 WL_SCREENCOPY_MANAGER_CAPTURE_OUTPUT_REGION :: 1
-WL_SCREENCOPY_MANAGER_DESTROY :: 2
 
 wl_screencopy_frame_interface := WL_Interface{"zwlr_screencopy_frame_v1", 3, 3, raw_data([]WL_Message{
 	{"copy", "o", raw_data([]^WL_Interface{&wl_buffer_interface})},
@@ -374,14 +311,12 @@ wl_screencopy_frame_interface := WL_Interface{"zwlr_screencopy_frame_v1", 3, 3, 
 
 WL_SCREENCOPY_FRAME_COPY :: 0
 WL_SCREENCOPY_FRAME_DESTROY :: 1
-WL_SCREENCOPY_FRAME_COPY_WITH_DAMAGE :: 2
 
 wl_fractional_scale_manager_interface := WL_Interface{"wp_fractional_scale_manager_v1", 1, 2, raw_data([]WL_Message{
 	{"destroy", "", WL_NO_TYPES},
 	{"get_fractional_scale", "no", raw_data([]^WL_Interface{&wl_fractional_scale_interface, &wl_surface_interface})},
 }), 0, nil}
 
-WL_FRACTIONAL_SCALE_MANAGER_DESTROY :: 0
 WL_FRACTIONAL_SCALE_MANAGER_GET_FRACTIONAL_SCALE :: 1
 
 wl_fractional_scale_interface := WL_Interface{"wp_fractional_scale_v1", 1, 1, raw_data([]WL_Message{
@@ -389,8 +324,6 @@ wl_fractional_scale_interface := WL_Interface{"wp_fractional_scale_v1", 1, 1, ra
 }), 1, raw_data([]WL_Message{
 	{"preferred_scale", "u", WL_NO_TYPES},
 })}
-
-WL_FRACTIONAL_SCALE_DESTROY :: 0
 
 wl_bind :: proc(registry: ^WL_Proxy, name: u32, interface: ^WL_Interface, version: u32) -> ^WL_Proxy {
 	v := min(version, u32(interface.version))
